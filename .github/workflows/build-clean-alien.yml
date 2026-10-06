@@ -1,0 +1,134 @@
+name: Build cleaned AlienV4
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Use official Gradle distribution
+        shell: bash
+        run: |
+          sed -i 's#https://mirrors.cloud.tencent.com/gradle/#https://services.gradle.org/distributions/#' gradle/wrapper/gradle-wrapper.properties
+          chmod +x gradlew
+
+      - name: Apply safety cleanup
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def edit(path, replacements):
+              p = Path(path)
+              s = p.read_text(encoding="utf-8")
+              old = s
+              for a, b in replacements:
+                  s = s.replace(a, b)
+              if s == old:
+                  print(f"[note] no textual change in {path}")
+              p.write_text(s, encoding="utf-8")
+
+          # Remove external QQ lookup command.
+          edit(
+              "src/main/java/dev/luminous/core/impl/CommandManager.java",
+              [
+                  ("import dev.luminous.mod.commands.impl.EsuCommand;\n", ""),
+                  ("      this.registerCommand(new EsuCommand());\n", ""),
+              ],
+          )
+
+          # Remove hidden IRC stub and server-lag module from registration.
+          edit(
+              "src/main/java/dev/luminous/core/impl/ModuleManager.java",
+              [
+                  ("import dev.luminous.mod.modules.impl.client.IRC;\n", ""),
+                  ("import dev.luminous.mod.modules.impl.exploit.ServerLagger;\n", ""),
+                  ("      this.addModule(new IRC());\n", ""),
+                  ("      this.addModule(new ServerLagger());\n", ""),
+              ],
+          )
+
+          # Conservative, vanilla-like defaults. No anti-cheat bypass tuning.
+          edit(
+              "src/main/java/dev/luminous/mod/modules/impl/client/AntiCheat.java",
+              [
+                  ('new BooleanSetting("MultiPlace", true,', 'new BooleanSetting("MultiPlace", false,'),
+                  ('new BooleanSetting("PacketPlace", true,', 'new BooleanSetting("PacketPlace", false,'),
+              ],
+          )
+
+          # Client-only Fabric mod.
+          edit(
+              "src/main/resources/fabric.mod.json",
+              [
+                  ('"environment": "*"', '"environment": "client"'),
+              ],
+          )
+
+          # Remove unused account-switching binary and duplicate/unused includes.
+          edit(
+              "build.gradle",
+              [
+                  ("    modImplementation name: 'IAS-Fabric-1.21.1-9.0.4'\n", ""),
+                  ("    include name: 'IAS-Fabric-1.21.1-9.0.4'\n", ""),
+                  ('    include "org.ladysnake:satin-2.0.0"\n', ""),
+              ],
+          )
+
+          for path in [
+              "src/main/java/dev/luminous/mod/commands/impl/EsuCommand.java",
+              "src/main/java/dev/luminous/mod/modules/impl/client/IRC.java",
+              "src/main/java/dev/luminous/mod/modules/impl/exploit/ServerLagger.java",
+              "lib/IAS-Fabric-1.21.1-9.0.4.jar",
+          ]:
+              p = Path(path)
+              if p.exists():
+                  p.unlink()
+                  print(f"removed {path}")
+
+      - name: Safety sanity check
+        shell: bash
+        run: |
+          set -e
+          test ! -e src/main/java/dev/luminous/mod/commands/impl/EsuCommand.java
+          test ! -e src/main/java/dev/luminous/mod/modules/impl/client/IRC.java
+          test ! -e src/main/java/dev/luminous/mod/modules/impl/exploit/ServerLagger.java
+          test ! -e lib/IAS-Fabric-1.21.1-9.0.4.jar
+          ! grep -R -n -E 'api\.xywlapi\.cc|47\.121\.113\.160' src/main/java
+
+      - name: Build
+        shell: bash
+        run: ./gradlew --no-daemon clean build
+
+      - name: Prepare final JAR
+        shell: bash
+        run: |
+          mkdir -p dist
+          JAR="$(find build/libs -maxdepth 1 -type f -name '*.jar' \
+            ! -name '*-sources.jar' ! -name '*-dev.jar' | head -n 1)"
+          test -n "$JAR"
+          cp "$JAR" dist/AlienV4-4.0.0-clean.jar
+          sha256sum dist/AlienV4-4.0.0-clean.jar | tee dist/SHA256.txt
+
+      - name: Upload cleaned JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: AlienV4-clean
+          path: |
+            dist/AlienV4-4.0.0-clean.jar
+            dist/SHA256.txt
+          if-no-files-found: error
